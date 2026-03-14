@@ -1,33 +1,39 @@
 # 🚀 Настройка sing-box + WARP
 
+
 ### Шаг 0: Подготовка АнтиЗапрета (Изоляция и маркировка)
 
-Нам нужно разрешить файрволу АнтиЗапрета принимать ответный трафик от sing-box и научить OpenVPN маркировать свои пакеты для защиты от зацикливания.
+Нам нужно разрешить файрволу АнтиЗапрета принимать ответный трафик и научить OpenVPN маркировать свои пакеты, чтобы они правильно уходили клиентам.
 
 **1. Отключаем изоляцию клиентов:**
-По умолчанию `iptables` в АнтиЗапрете блокирует трафик, идущий к VPN-клиентам не из основного интерфейса. Чтобы клиенты могли получать ответы от sing-box, эту блокировку нужно снять.
+По умолчанию `iptables` в АнтиЗапрете блокирует трафик, идущий к VPN-клиентам не из основного интерфейса. Чтобы клиенты могли получать ответы, эту блокировку нужно снять.
 Откройте конфигурационный файл установщика:
 
 ```bash
 nano /root/antizapret/setup
+
 ```
 
 Найдите параметр `CLIENT_ISOLATION` и измените его значение с `y` на `n`:
 
 ```ini
 CLIENT_ISOLATION=n
+
 ```
 
 Сохраните файл (`Ctrl+O`, `Enter`, `Ctrl+X`).
 
 **2. Добавляем метку ВО ВСЕ конфиги OpenVPN:**
+
 > **💡 Зачем нам метка `mark 555`?**
-> Метка нужна для защиты от бесконечной петли маршрутизации (routing loop).
+> Метка нужна для того, чтобы ответный трафик от OpenVPN-сервера уходил клиентам **напрямую на физический интерфейс сервера**, полностью в обход `sing-box`.
+> Если этого не сделать, ответы сервера попадут в виртуальный интерфейс `sing-box`. Так как это прокси-сервер, он создаст для ответа новое соединение от своего внутреннего IP-адреса (`172.19.0.1`). VPN-клиент не узнает этот адрес, отбросит пакет, и подключение не состоится.
 
 Чтобы защитить все возможные виды подключений, добавим `mark 555` во все конфигурационные файлы OpenVPN, которые лежат на сервере. Выполните одну быструю команду, которая добавит эту строчку во все `.conf` файлы разом:
 
 ```bash
 echo "mark 555" | tee -a /etc/openvpn/server/antizapret-udp.conf /etc/openvpn/server/antizapret-tcp.conf /etc/openvpn/server/vpn-udp.conf /etc/openvpn/server/vpn-tcp.conf
+
 ```
 
 **3. Перезагрузка:**
@@ -35,6 +41,7 @@ echo "mark 555" | tee -a /etc/openvpn/server/antizapret-udp.conf /etc/openvpn/se
 
 ```bash
 reboot
+
 ```
 
 ---
@@ -64,12 +71,14 @@ chmod +x wgcf
 # Регистрируем аккаунт и генерируем конфиг
 ./wgcf register --accept-tos
 ./wgcf generate
+
 ```
 
 Откройте созданный файл:
 
 ```bash
 cat wgcf-profile.conf
+
 ```
 
 Вам нужно скопировать оттуда **два значения** для следующего шага:
@@ -85,6 +94,7 @@ cat wgcf-profile.conf
 
 ```bash
 nano /etc/sing-box/config.json
+
 ```
 
 Удалите всё содержимое и вставьте код ниже.
@@ -116,7 +126,11 @@ nano /etc/sing-box/config.json
             "0.0.0.0/0",
             "::/0"
           ],
-          "reserved": [0, 0, 0]
+          "reserved": [
+            0,
+            0,
+            0
+          ]
         }
       ]
     }
@@ -132,8 +146,6 @@ nano /etc/sing-box/config.json
       "auto_route": true,
       "strict_route": false,
       "stack": "system",
-      "sniff": true,
-      "sniff_override_destination": true,
       "mtu": 1280
     }
   ],
@@ -158,9 +170,19 @@ nano /etc/sing-box/config.json
         "format": "binary",
         "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google-gemini.srs",
         "download_detour": "direct"
+      },
+      {
+        "tag": "geosite-google",
+        "type": "remote",
+        "format": "binary",
+        "url": "https://github.com/SagerNet/sing-geosite/raw/refs/heads/rule-set/geosite-google.srs",
+        "download_detour": "direct"
       }
     ],
     "rules": [
+      {
+        "action": "sniff"
+      },
       {
         "ip_is_private": true,
         "outbound": "direct"
@@ -175,9 +197,17 @@ nano /etc/sing-box/config.json
     ],
     "auto_detect_interface": true,
     "final": "direct"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true
+    }
   }
 }
+
 ```
+
+> **💡 Как работает этот конфиг?** > Действие `sniff` в правилах маршрутизации заглядывает внутрь проходящего трафика и "на лету" определяет доменное имя сайта. Затем этот домен проверяется по спискам `geosite`, и если это ИИ-сервис (OpenAI или Gemini) — пакет отправляется в WARP (Wireguard). Включенная опция `cache_file` позволяет `sing-box` сохранять скачанные списки сайтов (`type: remote`).
 
 *(Сохраните файл: нажмите `Ctrl+O`, затем `Enter`, затем `Ctrl+X`)*
 
@@ -185,10 +215,11 @@ nano /etc/sing-box/config.json
 
 ### Шаг 4: Настройка системной службы (systemd)
 
-Чтобы предотвратить зацикливание трафика и заставить пакеты с меткой `555` идти к клиентам в обход туннеля, редактируем файл службы:
+Чтобы заставить пакеты с меткой `555` идти к клиентам в обход туннеля, редактируем файл службы:
 
 ```bash
 nano /usr/lib/systemd/system/sing-box.service
+
 ```
 
 Приведите его к следующему виду:
@@ -214,6 +245,7 @@ LimitNOFILE=infinity
 
 [Install]
 WantedBy=multi-user.target
+
 ```
 
 *(Сохраните файл: `Ctrl+O`, `Enter`, `Ctrl+X`)*
@@ -229,22 +261,25 @@ WantedBy=multi-user.target
 ```bash
 systemctl daemon-reload
 systemctl start sing-box
+
 ```
 
 Убедитесь, что сервис работает (должен гореть зеленый статус `active (running)`):
 
 ```bash
 systemctl status sing-box
+
 ```
 
 ---
 
 ### ✅ Шаг 6: Проверка работоспособности и Автозагрузка
 
-Мы специально завернули трафик OpenAI в WARP. Сайт ChatGPT работает через Cloudflare, что дает нам  способ протестировать работу туннеля всего одной командой, обратившись к служебной странице трассировки (`/cdn-cgi/trace`).
+Мы специально завернули трафик OpenAI в WARP. Сайт ChatGPT работает через Cloudflare, что дает нам способ протестировать работу туннеля всего одной командой, обратившись к служебной странице трассировки (`/cdn-cgi/trace`).
 
 ```bash
 curl -s https://chatgpt.com/cdn-cgi/trace | grep warp
+
 ```
 
 Если в ответ вы увидели строку `warp=on` или `warp=plus` — значит, туннель работает идеально!
@@ -253,6 +288,5 @@ curl -s https://chatgpt.com/cdn-cgi/trace | grep warp
 
 ```bash
 systemctl enable sing-box
-```
 
-Всё готово! Теперь трафик для ChatGPT и Gemini успешно заворачивается в WARP.
+```
